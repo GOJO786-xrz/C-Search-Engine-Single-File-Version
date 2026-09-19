@@ -1,0 +1,3 @@
+C++ is a powerful general-purpose programming language. It supports
+procedural, object-oriented, and generic programming. Modern C++ includes
+features like lambdas, smart pointers, and move semantics.
