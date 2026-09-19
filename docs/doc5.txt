@@ -1,0 +1,3 @@
+C++ templates allow generic programming. The standard template library
+(STL) provides containers, iterators, and algorithms. Modern C++ code
+often uses smart pointers and lambdas.
