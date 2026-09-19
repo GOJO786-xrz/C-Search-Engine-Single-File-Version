@@ -1,0 +1,5 @@
+search_engine
+*.o
+*.out
+*.exe
+build/
