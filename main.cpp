@@ -1,23 +1,8 @@
-/*
- * Simple C++ Search Engine
- * ------------------------
- * A lightweight, in-memory search engine that:
- *   - Loads .txt documents from a directory
- *   - Builds an inverted index
- *   - Ranks results using TF-IDF with length normalization
- *   - Supports interactive queries from the terminal
- *
- * Build:  g++ -std=c++17 -O2 -o search_engine main.cpp
- * Run:    ./search_engine docs
- *
- * Author: <your-name>
- * License: MIT
- */
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <filesystem>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -27,28 +12,23 @@
 #include <utility>
 #include <vector>
 
-namespace fs = std::filesystem;
+#include <dirent.h>   // POSIX directory listing (no C++17 needed)
 
-// ---------------------------------------------------------------------------
-// Common English stop words (ignored during indexing & querying)
-// ---------------------------------------------------------------------------
 static const std::unordered_set<std::string> kStopWords = {
     "a","an","and","are","as","at","be","by","for","from","has","he","in","is",
     "it","its","of","on","that","the","to","was","were","will","with","this",
     "but","or","not","you","your","i","we","they","do","does","did","so","if"
 };
 
-// ---------------------------------------------------------------------------
-// SearchEngine
-// ---------------------------------------------------------------------------
 class SearchEngine {
 public:
-    // Add a single document to the index
     void addDocument(const std::string& docId, const std::string& content) {
         documents_[docId] = content;
 
         int length = 0;
-        for (const auto& token : tokenize(content)) {
+        std::vector<std::string> tokens = tokenize(content);
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            const std::string& token = tokens[i];
             if (token.size() < 2 || isStopWord(token)) continue;
             index_[token][docId] += 1;
             ++length;
@@ -56,51 +36,67 @@ public:
         docLengths_[docId] = length;
     }
 
-    // Load every .txt file inside a directory
     void loadDirectory(const std::string& path) {
-        if (!fs::exists(path) || !fs::is_directory(path)) {
+        DIR* dir = opendir(path.c_str());
+        if (!dir) {
             std::cerr << "Directory not found: " << path << "\n";
             return;
         }
 
-        for (const auto& entry : fs::directory_iterator(path)) {
-            if (!entry.is_regular_file()) continue;
-            if (entry.path().extension() != ".txt") continue;
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            std::string name = entry->d_name;
+            if (name == "." || name == "..") continue;
 
-            std::ifstream file(entry.path());
+            // Only .txt files
+            if (name.size() < 4 || name.substr(name.size() - 4) != ".txt")
+                continue;
+
+            std::string fullPath = path + "/" + name;
+            std::ifstream file(fullPath.c_str());
             if (!file) continue;
 
             std::stringstream buffer;
             buffer << file.rdbuf();
-            addDocument(entry.path().filename().string(), buffer.str());
+            addDocument(name, buffer.str());
         }
+        closedir(dir);
 
         std::cout << "Loaded " << documents_.size() << " document(s).\n";
     }
 
-    // Search: returns (docId, score) sorted by descending relevance
-    std::vector<std::pair<std::string, double>>
+    std::vector<std::pair<std::string, double> >
     search(const std::string& query, std::size_t topK = 10) const {
-        // Build query term frequencies
         std::unordered_map<std::string, int> queryTerms;
-        for (const auto& token : tokenize(query)) {
+        std::vector<std::string> qTokens = tokenize(query);
+        for (std::size_t i = 0; i < qTokens.size(); ++i) {
+            const std::string& token = qTokens[i];
             if (token.size() < 2 || isStopWord(token)) continue;
             queryTerms[token]++;
         }
 
-        if (queryTerms.empty()) return {};
+        if (queryTerms.empty())
+            return std::vector<std::pair<std::string, double> >();
 
         std::unordered_map<std::string, double> scores;
 
-        for (const auto& [term, qCount] : queryTerms) {
-            auto it = index_.find(term);
+        for (const auto& kv : queryTerms) {
+            const std::string& term = kv.first;
+            const int qCount = kv.second;
+
+            std::unordered_map<std::string,
+                std::unordered_map<std::string, int> >::const_iterator it =
+                index_.find(term);
             if (it == index_.end()) continue;
 
             const double termIdf = idf(term);
             const double queryWeight =
                 (1.0 + std::log(static_cast<double>(qCount))) * termIdf;
 
-            for (const auto& [docId, termFreq] : it->second) {
+            for (const auto& kv2 : it->second) {
+                const std::string& docId    = kv2.first;
+                const int          termFreq = kv2.second;
+
                 const double docWeight =
                     (1.0 + std::log(static_cast<double>(termFreq))) * termIdf;
 
@@ -112,10 +108,11 @@ public:
             }
         }
 
-        std::vector<std::pair<std::string, double>> ranked(scores.begin(),
-                                                           scores.end());
+        std::vector<std::pair<std::string, double> > ranked(scores.begin(),
+                                                            scores.end());
         std::sort(ranked.begin(), ranked.end(),
-                  [](const auto& a, const auto& b) {
+                  [](const std::pair<std::string, double>& a,
+                     const std::pair<std::string, double>& b) {
                       return a.second > b.second;
                   });
 
@@ -131,16 +128,15 @@ public:
 private:
     std::unordered_map<std::string, std::string> documents_;
     std::unordered_map<std::string,
-                       std::unordered_map<std::string, int>> index_;
+                       std::unordered_map<std::string, int> > index_;
     std::unordered_map<std::string, int> docLengths_;
 
-    // --- helpers -----------------------------------------------------------
     static std::vector<std::string> tokenize(const std::string& text) {
         std::vector<std::string> tokens;
         std::string current;
 
-        for (char c : text) {
-            const auto uc = static_cast<unsigned char>(c);
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            const unsigned char uc = static_cast<unsigned char>(text[i]);
             if (std::isalnum(uc)) {
                 current += static_cast<char>(std::tolower(uc));
             } else if (!current.empty()) {
@@ -157,18 +153,17 @@ private:
     }
 
     double idf(const std::string& term) const {
-        auto it = index_.find(term);
+        std::unordered_map<std::string,
+            std::unordered_map<std::string, int> >::const_iterator it =
+            index_.find(term);
         if (it == index_.end()) return 0.0;
 
         const double N  = static_cast<double>(documents_.size());
         const double df = static_cast<double>(it->second.size());
-        return std::log((N + 1.0) / (df + 1.0)) + 1.0;   // smoothed IDF
+        return std::log((N + 1.0) / (df + 1.0)) + 1.0;
     }
 };
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     const std::string docsPath = (argc > 1) ? argv[1] : "docs";
 
@@ -184,7 +179,9 @@ int main(int argc, char** argv) {
         if (line == "quit" || line == "exit") break;
         if (line.empty()) continue;
 
-        const auto results = engine.search(line, 10);
+        std::vector<std::pair<std::string, double> > results =
+            engine.search(line, 10);
+
         if (results.empty()) {
             std::cout << "No results found.\n\n";
             continue;
